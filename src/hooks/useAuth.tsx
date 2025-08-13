@@ -93,11 +93,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(userData);
     }
   };
-  const isAdmin = () => {
-    const currentUser = netlifyIdentity.currentUser();
-    const role = currentUser?.app_metadata?.role;
-    return role && ['admin', 'super_admin', 'event_manager'].includes(role) || adminPermissions.length > 0;
-  };
+  const isAdmin = adminPermissions.length > 0;
 
   const login = () => {
     netlifyIdentity.open('login');
@@ -142,7 +138,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider value={{
       user,
       loading,
-      isAdmin: isAdmin(),
+      isAdmin,
       permissions: adminPermissions,
       login,
       register,

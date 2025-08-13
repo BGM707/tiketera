@@ -23,7 +23,7 @@ interface Order {
 }
 
 export function MyAccount() {
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, getToken } = useAuth();
   const [activeTab, setActiveTab] = useState('profile');
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);

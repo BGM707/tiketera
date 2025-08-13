@@ -22,12 +22,33 @@ export const handler: Handler = async (event, context) => {
   }
 
   try {
-    const user = context.clientContext?.user;
-    if (!user) {
+    // Get user from Authorization header
+    const authHeader = event.headers.authorization || event.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return {
+        statusCode: 401,
+        headers, 
+        body: JSON.stringify({ error: 'No authorization token provided' }),
+      };
+    }
+
+    const token = authHeader.replace('Bearer ', '');
+    
+    // Decode JWT token to get user info
+    let user;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      user = {
+        sub: payload.sub,
+        email: payload.email,
+        user_metadata: payload.user_metadata || {},
+        email_verified_at: payload.email_verified_at
+      };
+    } catch (error) {
       return {
         statusCode: 401,
         headers,
-        body: JSON.stringify({ error: 'No user found' }),
+        body: JSON.stringify({ error: 'Invalid token format' }),
       };
     }
 
@@ -66,7 +87,7 @@ export const handler: Handler = async (event, context) => {
           VALUES (
             ${userData.id},
             'super_admin',
-            '["manage_events", "manage_users", "view_analytics", "financial_reports", "manage_venues", "security_logs", "system_settings", "view_dashboard", "scan_tickets"]'::jsonb,
+            '["manage_events", "manage_users", "view_analytics", "financial_reports", "manage_venues", "security_logs", "system_settings", "view_dashboard", "scan_tickets"]',
             true
           )
         `;
@@ -91,7 +112,7 @@ export const handler: Handler = async (event, context) => {
 
     const isAdmin = adminCheck.length > 0;
     const adminRole = isAdmin ? adminCheck[0].role : null;
-    const permissions = isAdmin ? adminCheck[0].permissions : [];
+    const permissions = isAdmin ? (typeof adminCheck[0].permissions === 'string' ? JSON.parse(adminCheck[0].permissions) : adminCheck[0].permissions) : [];
 
     // Log security event
     await sql`
@@ -102,7 +123,7 @@ export const handler: Handler = async (event, context) => {
         ${event.headers['x-forwarded-for']?.split(',')[0] || event.headers['x-real-ip'] || 'unknown'},
         ${event.headers['user-agent'] || 'unknown'},
         'success',
-        '{"method": "netlify_identity", "is_admin": ${isAdmin}}'::jsonb
+        ${'{"method": "netlify_identity", "is_admin": ' + isAdmin + '}'}
       )
     `;
 
