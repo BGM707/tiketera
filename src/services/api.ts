@@ -1,174 +1,149 @@
-const LOCAL_API = 'http://localhost:8888/.netlify/functions';
-const PROD_API = '/.netlify/functions';
+import { Handler } from '@netlify/functions';
+import { neon } from '@netlify/neon';
 
-// Use relative path for production fallback instead of placeholder domain
-const PROD_FULL_URL = '/.netlify/functions';
+export const handler: Handler = async (event, context) => {
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Content-Type': 'application/json',
+  };
 
-const API_BASE = import.meta.env.DEV ? LOCAL_API : PROD_API;
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
 
-export class ApiService {
-  private static async request(endpoint: string, options: RequestInit = {}) {
-    const url = `${API_BASE}${endpoint}`;
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers,
+      body: JSON.stringify({ error: 'Method not allowed' }),
+    };
+  }
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-      });
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({ error: 'Network error' }));
-        throw new Error(error.error || `Request failed with status ${response.status}`);
-      }
-
-      return response.json();
-    } catch (err) {
-      // Fallback: si está en local y falla, probar con la URL de producción
-      if (import.meta.env.DEV) {
-        console.warn(`Fallo conexión local, intentando producción... (${url})`);
-        const fallbackResponse = await fetch(`${PROD_FULL_URL}${endpoint}`, {
-          ...options,
-          headers: {
-            'Content-Type': 'application/json',
-            ...options.headers,
-          },
-        });
-
-        if (!fallbackResponse.ok) {
-          const error = await fallbackResponse.json().catch(() => ({ error: 'Network error' }));
-          throw new Error(error.error || `Fallback request failed: ${fallbackResponse.status}`);
-        }
-
-        return fallbackResponse.json();
-      }
-
-      throw err;
+  try {
+    // Get user from Authorization header
+    const authHeader = event.headers.authorization || event.headers.Authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return {
+        statusCode: 401,
+        headers, 
+        body: JSON.stringify({ error: 'No authorization token provided' }),
+      };
     }
-  }
 
-  // Events
-  static async getEvents() {
-    return this.request('/get-events');
-  }
+    const token = authHeader.replace('Bearer ', '');
+    
+    // Decode JWT token to get user info
+    let user;
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      user = {
+        sub: payload.sub,
+        email: payload.email,
+        user_metadata: payload.user_metadata || {},
+        email_verified_at: payload.email_verified_at
+      };
+    } catch (error) {
+      return {
+        statusCode: 401,
+        headers,
+        body: JSON.stringify({ error: 'Invalid token format' }),
+      };
+    }
 
-  static async getEvent(id: string) {
-    return this.request(`/get-event?id=${encodeURIComponent(id)}`);
-  }
+    const sql = neon(process.env.NETLIFY_DATABASE_URL!);
 
-  static async createEvent(eventData: any, token: string) {
-    return this.request('/create-event', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(eventData),
-    });
-  }
+    // Check if user exists, if not create them
+    const existingUser = await sql`
+      SELECT id, email FROM users WHERE netlify_id = ${user.sub}
+    `;
 
-  static async updateEvent(id: string, eventData: any, token: string) {
-    return this.request(`/update-event?id=${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(eventData),
-    });
-  }
+    let userData;
+    if (existingUser.length === 0) {
+      // Create new user
+      const newUser = await sql`
+        INSERT INTO users (
+          netlify_id, email, first_name, last_name, 
+          email_verified, status, last_login
+        ) VALUES (
+          ${user.sub},
+          ${user.email},
+          ${user.user_metadata?.first_name || user.user_metadata?.full_name?.split(' ')[0] || ''},
+          ${user.user_metadata?.last_name || user.user_metadata?.full_name?.split(' ').slice(1).join(' ') || ''},
+          ${user.email_verified_at !== null},
+          'active',
+          NOW()
+        )
+        RETURNING *
+      `;
+      userData = newUser[0];
 
-  static async deleteEvent(id: string, token: string) {
-    return this.request(`/delete-event?id=${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-  }
+      // Check if this email should be an admin
+      const adminEmails = ['beenja74@gmail.com', 'elfukoenpatines@gmail.com'];
+      if (adminEmails.includes(user.email)) {
+        await sql`
+          INSERT INTO admin_users (user_id, role, permissions, is_active)
+          VALUES (
+            ${userData.id},
+            'super_admin',
+            '["manage_events", "manage_users", "view_analytics", "financial_reports", "manage_venues", "security_logs", "system_settings", "view_dashboard", "scan_tickets"]'::jsonb,
+            true
+          )
+        `;
+      }
+    } else {
+      // Update last login
+      await sql`
+        UPDATE users 
+        SET last_login = NOW()
+        WHERE netlify_id = ${user.sub}
+      `;
+      userData = existingUser[0];
+    }
 
-  // Venues
-  static async getVenues() {
-    return this.request('/get-venues');
-  }
+    // Check if user is admin
+    const adminCheck = await sql`
+      SELECT au.role, au.permissions 
+      FROM admin_users au
+      JOIN users u ON au.user_id = u.id
+      WHERE u.netlify_id = ${user.sub} AND au.is_active = true
+    `;
 
-  static async createVenue(venueData: any, token: string) {
-    return this.request('/create-venue', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(venueData),
-    });
-  }
+    const isAdmin = adminCheck.length > 0;
+    const adminRole = isAdmin ? adminCheck[0].role : null;
+    const permissions = isAdmin ? adminCheck[0].permissions : [];
 
-  // Dashboard
-  static async getDashboardStats(token: string) {
-    return this.request('/get-dashboard-stats', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-  }
+    // Log security event
+    await sql`
+      INSERT INTO security_logs (user_id, action, ip_address, user_agent, status, details)
+      VALUES (
+        ${userData.id},
+        'login',
+        ${event.headers['x-forwarded-for']?.split(',')[0] || event.headers['x-real-ip'] || 'unknown'},
+        ${event.headers['user-agent'] || 'unknown'},
+        'success',
+        '{"method": "netlify_identity", "is_admin": ${isAdmin}}'::jsonb
+      )
+    `;
 
-  // Authentication
-  static async authCallback(token: string) {
-    return this.request('/auth-callback', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        user: userData,
+        isAdmin,
+        adminRole,
+        permissions,
+        message: 'User authenticated successfully'
+      }),
+    };
+  } catch (error) {
+    console.error('Auth callback error:', error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ error: 'Authentication failed' }),
+    };
   }
-
-  static async resetPassword(email: string) {
-    return this.request('/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    });
-  }
-
-  static async verifyEmail(token: string) {
-    return this.request('/verify-email', {
-      method: 'POST',
-      body: JSON.stringify({ token }),
-    });
-  }
-
-  static async resendVerification(email: string) {
-    return this.request('/resend-verification', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    });
-  }
-
-  // QR Scanner
-  static async verifyQR(qrCode: string, token: string) {
-    return this.request('/verify-qr', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ qr_code: qrCode }),
-    });
-  }
-
-  // Orders and Reservations
-  static async reserveSeats(reservationData: any, token: string) {
-    return this.request('/reserve-seat', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(reservationData),
-    });
-  }
-
-  static async getOrders(token: string) {
-    return this.request('/get-orders', {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-  }
-}
+};
