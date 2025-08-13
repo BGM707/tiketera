@@ -1,8 +1,8 @@
 const LOCAL_API = 'http://localhost:8888/.netlify/functions';
 const PROD_API = '/.netlify/functions';
 
-// Si tienes dominio fijo en producción, puedes reemplazar esta URL:
-const PROD_FULL_URL = 'https://tu-dominio.netlify.app/.netlify/functions';
+// Use relative path for production fallback instead of placeholder domain
+const PROD_FULL_URL = '/.netlify/functions';
 
 const API_BASE = import.meta.env.DEV ? LOCAL_API : PROD_API;
 
